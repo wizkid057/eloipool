@@ -150,7 +150,10 @@ class SocketHandler:
 			elif self.wbuftime < time():
 				# We should kill off this socket for having it's write buffer increase for too long
 				self.wbuftimeouts += 1
-				self.logger.debug(("Closing hung socket IP=%s with wbuf size %d (attempt %d)" % (self.remoteHost, len(self.wbuf), self.wbuftimeouts)))
+
+				# probably not needed
+				# self.logger.debug(("Closing hung socket IP=%s with wbuf size %d (attempt %d)" % (self.remoteHost, len(self.wbuf), self.wbuftimeouts)))
+
 				# give it 5 minutes
 				self.wbuftime = time() + 300
 				# empty the buffer here to be safe in case something else is making this socket hang

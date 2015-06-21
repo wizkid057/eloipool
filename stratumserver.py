@@ -281,7 +281,7 @@ class StratumServer(networkserver.AsyncSocketServer):
 		self.WakeRequest = 1
 		self.wakeup()
 		
-		self.UpdateTask = self.schedule(self.updateJob, time() + 55)
+		self.UpdateTask = self.schedule(self.updateJob, time() + 45)
 	
 	def pre_schedule(self):
 		if self.WakeRequest:
