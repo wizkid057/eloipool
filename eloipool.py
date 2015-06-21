@@ -647,8 +647,10 @@ def logShare(share):
 		share['solution'] = share['_origdata']
 	else:
 		share['solution'] = b2a_hex(swap32(share['data'])).decode('utf8')
-	for i in loggersShare:
-		i.logShare(share)
+
+	if 'rejectReason' not in share:
+		for i in loggersShare:
+			i.logShare(share)
 
 def checkAuthentication(username, password):
 	# HTTPServer uses bytes, and StratumServer uses str
