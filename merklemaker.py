@@ -477,6 +477,10 @@ class merkleMaker(threading.Thread):
 		MP = self._CallGBT(TS)
 		newMerkleTree = self._ProcessGBT(MP, TS)
 		
+		if newMerkleTree.MP['height'] < self.currentBlock[1]:
+			self.logger.debug('Template from \'%s\' has backward height %s' % (TS['name'], newMerkleTree.MP['height']))
+			return None
+
 		# Some versions of bitcoinrpc ServiceProxy have problems copying/pickling, so just store name and URI for now
 		newMerkleTree.source = TS['name']
 		newMerkleTree.source_uri = TS['uri']
