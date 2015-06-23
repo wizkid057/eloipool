@@ -18,6 +18,7 @@
 
 import argparse
 import importlib
+import struct
 argparser = argparse.ArgumentParser()
 argparser.add_argument('-c', '--config', help='Config name to load from config_<ARG>.py')
 args = argparser.parse_args()
@@ -26,6 +27,10 @@ if not args.config is None:
 	configmod = 'config_%s' % (args.config,)
 __import__(configmod)
 config = importlib.import_module(configmod)
+
+if not hasattr(config, 'BlockVersion'):
+	config.BlockVersion = 3
+config.BlockVersionBytes = struct.pack('<L', config.BlockVersion)
 
 if not hasattr(config, 'ServerName'):
 	config.ServerName = 'Unnamed Eloipool'
@@ -210,10 +215,13 @@ if not hasattr(config, 'DelayLogForUpstream'):
 
 if not hasattr(config, 'DynamicTargetting'):
 	config.DynamicTargetting = 0
+	config.DynamicTargetQuick = False
 else:
 	if not hasattr(config, 'DynamicTargetWindow'):
 		config.DynamicTargetWindow = 120
 	config.DynamicTargetGoal *= config.DynamicTargetWindow / 60
+	if not hasattr(config, 'DynamicTargetQuick'):
+		config.DynamicTargetQuick = True
 
 def submitGotwork(info):
 	try:
@@ -221,14 +229,16 @@ def submitGotwork(info):
 	except:
 		checkShare.logger.warning('Failed to submit gotwork\n' + traceback.format_exc())
 
+if not hasattr(config, 'GotWorkTarget'):
+	config.GotWorkTarget = 0
+
 def clampTarget(target, DTMode):
 	# ShareTarget is the minimum
 	if target is None or target > config.ShareTarget:
 		target = config.ShareTarget
 	
-	# Never target above the network, as we'd lose blocks
-	if target < networkTarget:
-		target = networkTarget
+	# Never target above upstream(s), as we'd lose blocks
+	target = max(target, networkTarget, config.GotWorkTarget)
 	
 	if DTMode == 2:
 		# Ceil target to a power of two :)
@@ -306,7 +316,7 @@ def RegisterWork(username, wli, wld, RequestedTarget = None):
 def getBlockHeader(username):
 	MRD = MM.getMRD()
 	merkleRoot = MRD[0]
-	hdr = MakeBlockHeader(MRD)
+	hdr = MakeBlockHeader(MRD, config.BlockVersionBytes)
 	workLog.setdefault(username, {})[merkleRoot] = (MRD, time())
 	target = RegisterWork(username, merkleRoot, MRD)
 	return (hdr, workLog[username][merkleRoot], target)
@@ -441,14 +451,13 @@ def checkData(share):
 	if data[72:76] != bits:
 		raise RejectedShare('bad-diffbits')
 	
-	# Block version is checked here
-	if data[1:4] != b'\0\0\0' or data[0] != 3:
+	if data[0] != config.BlockVersionBytes:
 		raise RejectedShare('bad-version')
 
 def buildStratumData(share, merkleroot):
 	(prevBlock, height, bits) = MM.currentBlock
 	
-	data = b'\x03\0\0\0'
+	data = config.BlockVersionBytes
 	data += prevBlock
 	data += merkleroot
 	data += share['ntime'][::-1]
@@ -472,6 +481,7 @@ def checkShare(share):
 	shareTime = share['time'] = time()
 	
 	username = share['username']
+	checkQuickDiffAdjustment = False
 	if 'data' in share:
 		# getwork/GBT
 		checkData(share)
@@ -500,12 +510,16 @@ def checkShare(share):
 			coinbase = None
 	else:
 		# Stratum
-		MWL = workLog[None]
+		checkQuickDiffAdjustment = config.DynamicTargetQuick
 		wli = share['jobid']
 		buildStratumData(share, b'\0' * 32)
 		mode = 'MC'
 		moden = 1
 		othertxndata = b''
+		if None not in workLog:
+			# We haven't yet sent any stratum work for this block
+			raise RejectedShare('unknown-work')
+		MWL = workLog[None]
 	
 	if wli not in MWL:
 		raise RejectedShare('unknown-work')
@@ -609,15 +623,6 @@ def checkShare(share):
 	if shareTimestamp > shareTime + 7200:
 		raise RejectedShare('time-too-new')
 	
-	if config.DynamicTargetting and username in userStatus:
-		# NOTE: userStatus[username] only doesn't exist across restarts
-		status = userStatus[username]
-		target = status[0] or config.ShareTarget
-		if target == workTarget:
-			userStatus[username][2] += 1
-		else:
-			userStatus[username][2] += float(target) / workTarget
-	
 	if moden:
 		cbpre = workCoinbase
 		cbpreLen = len(cbpre)
@@ -639,6 +644,17 @@ def checkShare(share):
 			allowed = assembleBlock(data, txlist)[80:]
 			if allowed != share['blkdata']:
 				raise RejectedShare('bad-txns')
+	
+	if config.DynamicTargetting and username in userStatus:
+		# NOTE: userStatus[username] only doesn't exist across restarts
+		status = userStatus[username]
+		target = status[0] or config.ShareTarget
+		if target == workTarget:
+			userStatus[username][2] += 1
+		else:
+			userStatus[username][2] += float(target) / workTarget
+		if checkQuickDiffAdjustment and userStatus[username][2] > config.DynamicTargetGoal * 2:
+			stratumsrv.quickDifficultyUpdate(username)
 checkShare.logger = logging.getLogger('checkShare')
 
 def logShare(share):
@@ -931,6 +947,7 @@ if __name__ == "__main__":
 	server.getBlockTemplate = getBlockTemplate
 	server.receiveShare = receiveShare
 	server.RaiseRedFlags = RaiseRedFlags
+	server.BlockVersion = config.BlockVersion
 	server.ShareTarget = config.ShareTarget
 	server.checkAuthentication = checkAuthentication
 	
@@ -942,7 +959,9 @@ if __name__ == "__main__":
 	stratumsrv.getStratumJob = getStratumJob
 	stratumsrv.getExistingStratumJob = getExistingStratumJob
 	stratumsrv.receiveShare = receiveShare
+	stratumsrv.RaiseRedFlags = RaiseRedFlags
 	stratumsrv.getTarget = getTarget
+	stratumsrv.BlockVersionHex = '%08x' % (config.BlockVersion,)
 	stratumsrv.defaultTarget = config.ShareTarget
 	stratumsrv.IsJobValid = IsJobValid
 	stratumsrv.checkAuthentication = checkAuthentication

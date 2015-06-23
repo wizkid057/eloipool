@@ -14,6 +14,7 @@
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import agplcompliance
 from binascii import b2a_hex
 import collections
 from copy import deepcopy
@@ -24,7 +25,9 @@ import socket
 import struct
 from time import time
 import traceback
-from util import RejectedShare, swap32, target2bdiff
+from util import RejectedShare, swap32, target2bdiff, UniqueSessionIdManager
+
+extranonce2sz = 4
 
 class StratumError(BaseException):
 	def __init__(self, errno, msg, tb = True):
@@ -47,11 +50,13 @@ class StratumHandler(networkserver.SocketHandler):
 		super().__init__(*a, **ka)
 		self.remoteHost = self.addr[0]
 		self.changeTask(None)
+		self.server.schedule(self.sendLicenseNotice, time() + 4, errHandler=self)
 		self.set_terminator(b"\n")
 		self.Usernames = {}
 		self.lastBDiff = None
 		self.JobTargets = collections.OrderedDict()
 		self.UA = None
+		self.LicenseSent = agplcompliance._SourceFiles is None
 	
 	def sendReply(self, ob):
 		return self.push(json.dumps(ob).encode('ascii') + b"\n")
@@ -107,11 +112,25 @@ class StratumHandler(networkserver.SocketHandler):
 				self.logger.debug(fexc)
 			return
 		
+		if rpc['id'] is None:
+			return
+		
 		self.sendReply({
 			'error': None,
 			'id': rpc['id'],
 			'result': rv,
 		})
+	
+	def sendLicenseNotice(self):
+		if self.fd == -1:
+			return
+		if not self.LicenseSent:
+			self.sendReply({
+				'id': 8,
+				'method': 'client.show_message',
+				'params': ('This stratum server is licensed under the GNU Affero General Public License, version 3. You may download source code over stratum using the server.get_source method.',),
+			})
+		self.LicenseSent = True
 	
 	def sendJob(self):
 		target = self.server.defaultTarget
@@ -144,8 +163,15 @@ class StratumHandler(networkserver.SocketHandler):
 	def _stratumreply_7(self, rpc):
 		self.UA = rpc.get('result') or rpc
 	
-	def _stratum_mining_subscribe(self, *a):
-		xid = struct.pack('@P', id(self))
+	def _stratum_mining_subscribe(self, UA = None, xid = None):
+		if not UA is None:
+			self.UA = UA
+		if not hasattr(self, '_sid'):
+			self._sid = UniqueSessionIdManager.get()
+		if self.server._Clients.get(self._sid) not in (self, None):
+			del self._sid
+			raise self.server.RaiseRedFlags(RuntimeError('issuing duplicate sessionid'))
+		xid = struct.pack('=I', self._sid)  # NOTE: Assumes sessionids are 4 bytes
 		self.extranonce1 = xid
 		xid = b2a_hex(xid).decode('ascii')
 		self.server._Clients[id(self)] = self
@@ -156,10 +182,13 @@ class StratumHandler(networkserver.SocketHandler):
 				['mining.set_difficulty', '%s2' % (xid,)],
 			],
 			xid,
-			4,
+			extranonce2sz,
 		]
 	
 	def close(self):
+		if hasattr(self, '_sid'):
+			UniqueSessionIdManager.put(self._sid)
+			delattr(self, '_sid')
 		try:
 			del self.server._Clients[id(self)]
 		except:
@@ -174,7 +203,7 @@ class StratumHandler(networkserver.SocketHandler):
 			'remoteHost': self.remoteHost,
 			'jobid': jobid,
 			'extranonce1': self.extranonce1,
-			'extranonce2': bytes.fromhex(extranonce2),
+			'extranonce2': bytes.fromhex(extranonce2)[:extranonce2sz],
 			'ntime': bytes.fromhex(ntime),
 			'nonce': bytes.fromhex(nonce),
 			'userAgent': self.UA,
@@ -208,6 +237,13 @@ class StratumHandler(networkserver.SocketHandler):
 			raise
 		(height, merkleTree, cb, prevBlock, bits) = MC[:5]
 		return list(b2a_hex(txn.data).decode('ascii') for txn in merkleTree.data[1:])
+	
+	def _stratum_server_get_source(self, path = ''):
+		s = agplcompliance.get_source(path.encode('utf8'))
+		if s:
+			s = list(s)
+			s[1] = s[1].decode('latin-1')
+		return s
 
 class StratumServer(networkserver.AsyncSocketServer):
 	logger = logging.getLogger('StratumServer')
@@ -215,7 +251,7 @@ class StratumServer(networkserver.AsyncSocketServer):
 	waker = True
 	schMT = True
 	
-	extranonce1null = struct.pack('@P', 0)
+	extranonce1null = struct.pack('=I', 0)  # NOTE: Assumes sessionids are 4 bytes
 	
 	def __init__(self, *a, **ka):
 		ka.setdefault('RequestHandlerClass', StratumHandler)
@@ -226,17 +262,12 @@ class StratumServer(networkserver.AsyncSocketServer):
 		self.JobId = '%d' % (time(),)
 		self.WakeRequest = None
 		self.UpdateTask = None
+		self._PendingQuickUpdates = set()
 	
 	def checkAuthentication(self, username, password):
 		return True
 	
-	def updateJob(self, wantClear = False):
-		if self.UpdateTask:
-			try:
-				self.rmSchedule(self.UpdateTask)
-			except:
-				pass
-		
+	def updateJobOnly(self, wantClear = False, forceClean = False):
 		self._JobId += 1
 		JobId = '%d %d' % (time(), self._JobId)
 		(MC, wld) = self.getStratumJob(JobId, wantClear=wantClear)
@@ -270,18 +301,50 @@ class StratumServer(networkserver.AsyncSocketServer):
 				b2a_hex(txn.data[:pos - len(self.extranonce1null) - 4]).decode('ascii'),
 				b2a_hex(txn.data[pos:]).decode('ascii'),
 				steps,
-				'00000003',
+				self.BlockVersionHex,
 				b2a_hex(bits[::-1]).decode('ascii'),
 				b2a_hex(struct.pack('>L', int(time()))).decode('ascii'),
-				not self.IsJobValid(self.JobId)
+				forceClean or not self.IsJobValid(self.JobId)
 			],
 		}).encode('ascii') + b"\n"
 		self.JobId = JobId
+		
+	def updateJob(self, wantClear = False):
+		if self.UpdateTask:
+			try:
+				self.rmSchedule(self.UpdateTask)
+			except:
+				pass
+		
+		self.updateJobOnly(wantClear=wantClear)
 		
 		self.WakeRequest = 1
 		self.wakeup()
 		
 		self.UpdateTask = self.schedule(self.updateJob, time() + 45)
+	
+	def doQuickUpdate(self):
+		PQU = self._PendingQuickUpdates
+		self._PendingQuickUpdates = set()
+		QUC = 0
+		for ic in list(self._Clients.values()):
+			if PQU.intersection(ic.Usernames):
+				if self.JobId in ic.JobTargets:
+					self.updateJobOnly(wantClear=True, forceClean=True)
+				try:
+					ic.sendJob()
+					QUC += 1
+				except socket.error:
+					# Ignore socket errors; let the main event loop take care of them later
+					pass
+				except:
+					self.logger.debug('Error sending quickupdate job:\n' + traceback.format_exc())
+		if QUC:
+			self.logger.debug("Quickupdated %d clients" % (QUC,))
+	
+	def quickDifficultyUpdate(self, username):
+		self._PendingQuickUpdates.add(username)
+		self.schedule(self.doQuickUpdate, time())
 	
 	def pre_schedule(self):
 		if self.WakeRequest:

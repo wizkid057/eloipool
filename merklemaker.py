@@ -35,10 +35,10 @@ import traceback
 _makeCoinbase = [0, 0]
 _filecounter = 0
 
-def MakeBlockHeader(MRD):
+def MakeBlockHeader(MRD, BlockVersionBytes):
 	(merkleRoot, merkleTree, coinbase, prevBlock, bits) = MRD[:5]
 	timestamp = pack('<L', int(time()))
-	hdr = b'\3\0\0\0' + prevBlock + merkleRoot + timestamp + bits + b'iolE'
+	hdr = BlockVersionBytes + prevBlock + merkleRoot + timestamp + bits + b'iolE'
 	return hdr
 
 def assembleBlock(blkhdr, txlist):
@@ -81,6 +81,7 @@ class merkleMaker(threading.Thread):
 		self.MinimumTemplateScore = 1
 		self.currentBlock = (None, None, None)
 		self.lastBlock = (None, None, None)
+		self.SubsidyAlgo = lambda height: 5000000000 >> (height // 210000)
 	
 	def _prepare(self):
 		self.TemplateSources = list(getattr(self, 'TemplateSources', ()))
@@ -157,7 +158,7 @@ class merkleMaker(threading.Thread):
 		self.nextMerkleUpdate = 0
 	
 	def createClearMerkleTree(self, height):
-		subsidy = 5000000000 >> (height // 210000)
+		subsidy = self.SubsidyAlgo(height)
 		cbtxn = self.makeCoinbaseTxn(subsidy, False)
 		cbtxn.assemble()
 		return MerkleTree([cbtxn])
@@ -416,7 +417,7 @@ class merkleMaker(threading.Thread):
 		cbtxn.assemble()
 		merkleRoot = newMerkleTree.merkleRoot()
 		MRD = (merkleRoot, newMerkleTree, coinbase, prevBlock, bits)
-		blkhdr = MakeBlockHeader(MRD)
+		blkhdr = MakeBlockHeader(MRD, self.BlockVersionBytes)
 		data = assembleBlock(blkhdr, txnlist)
 		ProposeReq = {
 			"mode": "proposal",
@@ -523,8 +524,9 @@ class merkleMaker(threading.Thread):
 					# NOTE: If you're going to try to remove this preference for the highest block, you need to (at least) stop _ProcessGBT from calling updateBlock whenever it sees a new high
 					AcceptRatio += newMerkleTree.MP['height']
 					
+					self.logger.debug('Template from \'%s\' has %s acceptance ratio at height %s' % (TS['name'], AcceptRatio, newMerkleTree.MP['height']))
 					if Best[0] < AcceptRatio:
-						Best = r
+						Best = (AcceptRatio, newMerkleTree)
 						if AcceptRatio == 1:
 							break
 				except:

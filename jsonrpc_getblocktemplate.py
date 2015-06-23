@@ -26,9 +26,10 @@ class _getblocktemplate:
 	def final_init(server):
 		ShareTargetHex = '%064x' % (server.ShareTarget,)
 		JSONRPCHandler.getblocktemplate_rv_template['target'] = ShareTargetHex
+		JSONRPCHandler.getblocktemplate_rv_template['version'] = server.BlockVersion
 		if hasattr(server, 'XStratumHeader'):
 			JSONRPCHandler.XStratumHeader = server.XStratumHeader	
-
+	
 	getblocktemplate_rv_template = {
 		'longpoll': '/LP',
 		'mutable': [
