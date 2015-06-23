@@ -79,7 +79,11 @@ class StratumHandler(networkserver.SocketHandler):
 			return
 		if 'method' not in rpc:
 			# Assume this is a reply to our request
-			funcname = '_stratumreply_%s' % (rpc['id'],)
+			try:
+				funcname = '_stratumreply_%s' % (rpc['id'],)
+			except:
+				return
+
 			if not hasattr(self, funcname):
 				return
 			try:
@@ -152,7 +156,10 @@ class StratumHandler(networkserver.SocketHandler):
 				],
 			})
 			self.lastBDiff = bdiff
-		self.push(self.server.JobBytes)
+		try:
+			self.push(self.server.JobBytes)
+		except:
+			pass
 		if len(self.JobTargets) > 4:
 			self.JobTargets.popitem(False)
 		self.JobTargets[self.server.JobId] = target
