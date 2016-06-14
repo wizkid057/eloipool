@@ -26,7 +26,6 @@ class _getblocktemplate:
 	def final_init(server):
 		ShareTargetHex = '%064x' % (server.ShareTarget,)
 		JSONRPCHandler.getblocktemplate_rv_template['target'] = ShareTargetHex
-		JSONRPCHandler.getblocktemplate_rv_template['version'] = server.BlockVersion
 		if hasattr(server, 'XStratumHeader'):
 			JSONRPCHandler.XStratumHeader = server.XStratumHeader	
 	
@@ -92,6 +91,12 @@ class _getblocktemplate:
 		txno = {}
 		txno['data'] = b2a_hex(t.data).decode('ascii')
 		rv['coinbasetxn'] = txno
+		rv['version'] = merkleTree.MP['version']
+		
+		rv['rules'] = merkleTree.MP['rules']
+		rv['vbavailable'] = merkleTree.MP['_filtered_vbavailable']
+		rv['vbrequired'] = rv['version'] & 0x1fffffff
+		
 		return rv
 	
 	def doJSON_submitblock(self, data, params = _NoParams):

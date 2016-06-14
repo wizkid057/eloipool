@@ -28,10 +28,6 @@ if not args.config is None:
 __import__(configmod)
 config = importlib.import_module(configmod)
 
-if not hasattr(config, 'BlockVersion'):
-	config.BlockVersion = 3
-config.BlockVersionBytes = struct.pack('<L', config.BlockVersion)
-
 if not hasattr(config, 'ServerName'):
 	config.ServerName = 'Unnamed Eloipool'
 
@@ -316,7 +312,7 @@ def RegisterWork(username, wli, wld, RequestedTarget = None):
 def getBlockHeader(username):
 	MRD = MM.getMRD()
 	merkleRoot = MRD[0]
-	hdr = MakeBlockHeader(MRD, config.BlockVersionBytes)
+	hdr = MakeBlockHeader(MRD)
 	workLog.setdefault(username, {})[merkleRoot] = (MRD, time())
 	target = RegisterWork(username, merkleRoot, MRD)
 	return (hdr, workLog[username][merkleRoot], target)
@@ -438,7 +434,7 @@ def blockSubmissionThread(payload, blkhash, share):
 			logShare(share)
 blockSubmissionThread.logger = logging.getLogger('blockSubmission')
 
-def checkData(share):
+def checkData(share, wld):
 	data = share['data']
 	data = data[:80]
 	(prevBlock, height, bits) = MM.currentBlock
@@ -451,13 +447,15 @@ def checkData(share):
 	if data[72:76] != bits:
 		raise RejectedShare('bad-diffbits')
 	
-	if data[0] != config.BlockVersionBytes:
+	MT = wld[1]
+	if data[0:4] != MT.MP['_BlockVersionBytes']:
 		raise RejectedShare('bad-version')
 
-def buildStratumData(share, merkleroot):
+def buildStratumData(share, merkleroot, wld):
 	(prevBlock, height, bits) = MM.currentBlock
 	
-	data = config.BlockVersionBytes
+	MT = wld[1]
+	data = MT.MP['_BlockVersionBytes']
 	data += prevBlock
 	data += merkleroot
 	data += share['ntime'][::-1]
@@ -477,6 +475,14 @@ def IsJobValid(wli, wluser = None):
 		return False
 	return True
 
+def LookupWork(username, wli):
+	if username not in workLog:
+		raise RejectedShare('unknown-user')
+	MWL = workLog[username]
+	if wli not in MWL:
+		raise RejectedShare('unknown-work')
+	return MWL[wli]
+
 def checkShare(share):
 	shareTime = share['time'] = time()
 	
@@ -484,12 +490,7 @@ def checkShare(share):
 	checkQuickDiffAdjustment = False
 	if 'data' in share:
 		# getwork/GBT
-		checkData(share)
 		data = share['data']
-		
-		if username not in workLog:
-			raise RejectedShare('unknown-user')
-		MWL = workLog[username]
 		
 		shareMerkleRoot = data[36:68]
 		if 'blkdata' in share:
@@ -508,22 +509,18 @@ def checkShare(share):
 			mode = 'MRD'
 			moden = 0
 			coinbase = None
+		
+		(wld, issueT) = LookupWork(username, wli)
+		checkData(share, wld)
 	else:
 		# Stratum
 		checkQuickDiffAdjustment = config.DynamicTargetQuick
 		wli = share['jobid']
-		buildStratumData(share, b'\0' * 32)
+		(wld, issueT) = LookupWork(None, wli)
 		mode = 'MC'
 		moden = 1
 		othertxndata = b''
-		if None not in workLog:
-			# We haven't yet sent any stratum work for this block
-			raise RejectedShare('unknown-work')
-		MWL = workLog[None]
 	
-	if wli not in MWL:
-		raise RejectedShare('unknown-work')
-	(wld, issueT) = MWL[wli]
 	share[mode] = wld
 	
 	share['issuetime'] = issueT
@@ -535,7 +532,7 @@ def checkShare(share):
 		coinbase = workCoinbase + share['extranonce1'] + share['extranonce2']
 		cbtxn.setCoinbase(coinbase)
 		cbtxn.assemble()
-		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn))
+		data = buildStratumData(share, workMerkleTree.withFirst(cbtxn), wld)
 		shareMerkleRoot = data[36:68]
 	
 	if data in DupeShareHACK:
@@ -947,7 +944,6 @@ if __name__ == "__main__":
 	server.getBlockTemplate = getBlockTemplate
 	server.receiveShare = receiveShare
 	server.RaiseRedFlags = RaiseRedFlags
-	server.BlockVersion = config.BlockVersion
 	server.ShareTarget = config.ShareTarget
 	server.checkAuthentication = checkAuthentication
 	
@@ -961,7 +957,6 @@ if __name__ == "__main__":
 	stratumsrv.receiveShare = receiveShare
 	stratumsrv.RaiseRedFlags = RaiseRedFlags
 	stratumsrv.getTarget = getTarget
-	stratumsrv.BlockVersionHex = '%08x' % (config.BlockVersion,)
 	stratumsrv.defaultTarget = config.ShareTarget
 	stratumsrv.IsJobValid = IsJobValid
 	stratumsrv.checkAuthentication = checkAuthentication
